@@ -311,13 +311,13 @@ const PacBhaiGame: React.FC = () => {
            // Return to center logic could go here, for now just respawn check or simple wander
        }
 
-       // Simple AI: Random turn at intersections
        const gCol = Math.floor(ghost.x / tileSize);
        const gRow = Math.floor(ghost.y / tileSize);
        const centerX = gCol * tileSize + tileSize / 2;
        const centerY = gRow * tileSize + tileSize / 2;
        const distToCenter = Math.sqrt(Math.pow(ghost.x - centerX, 2) + Math.pow(ghost.y - centerY, 2));
 
+       // AI DECISION MAKING AT INTERSECTIONS
        if (distToCenter < 5) {
            // Check available directions
            const options: Direction[] = [];
@@ -328,20 +328,66 @@ const PacBhaiGame: React.FC = () => {
 
            // Remove reverse direction unless dead end
            const reverseDir = { UP: 'DOWN', DOWN: 'UP', LEFT: 'RIGHT', RIGHT: 'LEFT', NONE: 'NONE' }[ghost.dir];
-           const filtered = options.filter(d => d !== reverseDir);
+           const validMoves = options.filter(d => d !== reverseDir);
            
-           if (filtered.length > 0) {
-             // If Scared, try to move AWAY from Pacman (Simple heuristic)
+           if (validMoves.length > 0) {
              if (ghost.isScared) {
-                // Determine direction away from pacman
-                // This is a simple random choice for MVP, fully tracking AI is complex
-                ghost.nextDir = filtered[Math.floor(Math.random() * filtered.length)];
+                // Frightened Mode: Move Randomly
+                ghost.nextDir = validMoves[Math.floor(Math.random() * validMoves.length)];
              } else {
-                // Random choice
-                ghost.nextDir = filtered[Math.floor(Math.random() * filtered.length)];
+                // CHASE/AMBUSH AI
+                // 1. Determine Target Tile (tx, ty) based on Ghost Personality
+                let targetX = pCol;
+                let targetY = pRow;
+
+                if (ghost.id === 0) {
+                    // Blinky (Red): Direct Chase
+                    targetX = pCol;
+                    targetY = pRow;
+                } else if (ghost.id === 1) {
+                    // Pinky (Pink): Ambush (Target 4 tiles ahead of Pacman)
+                    if (pac.dir === 'UP') targetY = pRow - 4;
+                    else if (pac.dir === 'DOWN') targetY = pRow + 4;
+                    else if (pac.dir === 'LEFT') targetX = pCol - 4;
+                    else if (pac.dir === 'RIGHT') targetX = pCol + 4;
+                } else if (ghost.id === 2) {
+                    // Inky (Cyan): Unpredictable (Target random nearby tile)
+                    // We generate a random offset every time it reaches an intersection
+                    const offX = Math.floor(Math.random() * 5) - 2; // -2 to 2
+                    const offY = Math.floor(Math.random() * 5) - 2;
+                    targetX = pCol + offX;
+                    targetY = pRow + offY;
+                } else {
+                    // Clyde (Orange): Random / Pokey
+                    // Just picks a random valid move like before or targets self to wander
+                    ghost.nextDir = validMoves[Math.floor(Math.random() * validMoves.length)];
+                }
+
+                if (ghost.id !== 3) {
+                    // 2. Select best direction to minimize distance to Target
+                    let bestDir = validMoves[0];
+                    let minDistance = Infinity;
+
+                    validMoves.forEach(dir => {
+                        let nextR = gRow;
+                        let nextC = gCol;
+                        if (dir === 'UP') nextR--;
+                        if (dir === 'DOWN') nextR++;
+                        if (dir === 'LEFT') nextC--;
+                        if (dir === 'RIGHT') nextC++;
+
+                        // Euclidean distance squared is enough for comparison
+                        const distSq = Math.pow(nextC - targetX, 2) + Math.pow(nextR - targetY, 2);
+                        if (distSq < minDistance) {
+                            minDistance = distSq;
+                            bestDir = dir;
+                        }
+                    });
+                    ghost.nextDir = bestDir;
+                }
              }
            } else if (options.length > 0) {
-             ghost.nextDir = options[0]; // Turn back
+             ghost.nextDir = options[0]; // Turn back if dead end
            }
        }
        

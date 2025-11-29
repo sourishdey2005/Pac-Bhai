@@ -36,6 +36,21 @@ const App: React.FC = () => {
          <PacBhaiGame />
       </main>
 
+      {/* Footer Credits */}
+      <footer className="mt-8 z-10 text-center">
+        <p className="text-xs text-stone-500">
+          Made by <span className="text-stone-300 font-semibold">Sourish Dey</span>
+        </p>
+        <a 
+          href="https://www.linkedin.com/in/sourish-dey-20b170206/" 
+          target="_blank" 
+          rel="noopener noreferrer"
+          className="text-[10px] text-orange-500 hover:text-orange-400 uppercase tracking-widest hover:underline mt-1 inline-block"
+        >
+          LinkedIn Profile
+        </a>
+      </footer>
+
       {/* Instructions Modal */}
       {showIntro && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
