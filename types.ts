@@ -39,7 +39,8 @@ export enum TileType {
   POWER = 3, // Chai
   GHOST_HOUSE = 4,
   PACMAN_START = 5,
-  GHOST_START = 6
+  GHOST_START = 6,
+  BREAKABLE_WALL = 7
 }
 
 export type GameState = 'START' | 'PLAYING' | 'GAME_OVER' | 'WON' | 'PAUSED';

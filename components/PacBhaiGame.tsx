@@ -1,11 +1,20 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react';
-import { RAW_MAP, COLORS, GAME_SPEED, GHOST_SPEED, GHOST_SCARED_SPEED, POWER_DURATION, TURBAN_COLORS } from '../constants';
+import { RAW_MAP, COLORS, GAME_SPEED, GHOST_SPEED, GHOST_SCARED_SPEED, POWER_DURATION, TURBAN_COLORS, WALL_BREAK_THRESHOLD } from '../constants';
 import { TileType, Direction, GameState, Pacman, Ghost, Entity } from '../types';
 import { getGameCommentary } from '../services/geminiService';
-import { RefreshCw, Play, Pause, Volume2, VolumeX, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, RotateCcw } from 'lucide-react';
+import { RefreshCw, Play, Pause, Volume2, VolumeX, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, RotateCcw, Hammer } from 'lucide-react';
 
 const MAP_ROWS = RAW_MAP.length;
 const MAP_COLS = RAW_MAP[0].length;
+
+interface Particle {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  life: number;
+  color: string;
+}
 
 const PacBhaiGame: React.FC = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -16,6 +25,9 @@ const PacBhaiGame: React.FC = () => {
   const pacmanRef = useRef<Pacman>({ x: 0, y: 0, dir: 'NONE', nextDir: 'NONE', speed: GAME_SPEED, radius: 0, mouthOpen: 0, lives: 3, score: 0, poweredUpTime: 0 });
   const ghostsRef = useRef<Ghost[]>([]);
   const mapRef = useRef<number[][]>([]); // Mutable map for eating dots
+  const particlesRef = useRef<Particle[]>([]);
+  const samosasEatenRef = useRef<number>(0);
+
   const animationFrameRef = useRef<number>(0);
   const lastTimeRef = useRef<number>(0);
   const mouthOpenDirRef = useRef<number>(1); // 1 for opening, -1 for closing
@@ -24,6 +36,7 @@ const PacBhaiGame: React.FC = () => {
   const [score, setScore] = useState(0);
   const [highScore, setHighScore] = useState(0);
   const [lives, setLives] = useState(3);
+  const [samosasEaten, setSamosasEaten] = useState(0);
   const [uiState, setUiState] = useState<GameState>('START');
   const [commentary, setCommentary] = useState<string>('');
   const [loadingCommentary, setLoadingCommentary] = useState(false);
@@ -65,10 +78,11 @@ const PacBhaiGame: React.FC = () => {
     }
     mapRef.current = newMap;
     ghostsRef.current = ghosts;
+    particlesRef.current = [];
   }, []);
 
   // Sound Synth Helper
-  const playSound = useCallback((type: 'chomp' | 'power' | 'die' | 'win') => {
+  const playSound = useCallback((type: 'chomp' | 'power' | 'die' | 'win' | 'break') => {
     if (!soundEnabled) return;
     if (!audioCtxRef.current) {
         audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
@@ -107,8 +121,28 @@ const PacBhaiGame: React.FC = () => {
         gain.gain.linearRampToValueAtTime(0, now + 0.5);
         osc.start(now);
         osc.stop(now + 0.5);
+    } else if (type === 'break') {
+        osc.frequency.setValueAtTime(100, now);
+        osc.frequency.exponentialRampToValueAtTime(50, now + 0.2);
+        osc.type = 'square';
+        gain.gain.setValueAtTime(0.2, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.2);
+        osc.start(now);
+        osc.stop(now + 0.2);
     }
   }, [soundEnabled]);
+
+  const createParticles = (x: number, y: number, color: string) => {
+      for(let i=0; i<10; i++) {
+          particlesRef.current.push({
+              x, y,
+              vx: (Math.random() - 0.5) * 4,
+              vy: (Math.random() - 0.5) * 4,
+              life: 1.0,
+              color: color
+          });
+      }
+  };
 
   const togglePause = useCallback(() => {
     if (gameStateRef.current === 'PLAYING') {
@@ -123,9 +157,7 @@ const PacBhaiGame: React.FC = () => {
   // Input Handling
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Pause Toggle
       if (e.code === 'Space' || e.key.toLowerCase() === 'p') {
-        // Only prevent default if it's Space to avoid scrolling
         if(e.code === 'Space') e.preventDefault();
         togglePause();
         return;
@@ -133,7 +165,6 @@ const PacBhaiGame: React.FC = () => {
 
       if (gameStateRef.current !== 'PLAYING') return;
       
-      // WASD + Arrows
       switch(e.key) {
         case 'ArrowUp': case 'w': case 'W': e.preventDefault(); pacmanRef.current.nextDir = 'UP'; break;
         case 'ArrowDown': case 's': case 'S': e.preventDefault(); pacmanRef.current.nextDir = 'DOWN'; break;
@@ -142,7 +173,6 @@ const PacBhaiGame: React.FC = () => {
       }
     };
     
-    // Touch handling for Swipe
     let touchStartX = 0;
     let touchStartY = 0;
 
@@ -159,7 +189,7 @@ const PacBhaiGame: React.FC = () => {
       const dy = touchEndY - touchStartY;
 
       if (Math.abs(dx) > Math.abs(dy)) {
-        if (Math.abs(dx) > 30) { // Threshold
+        if (Math.abs(dx) > 30) { 
           pacmanRef.current.nextDir = dx > 0 ? 'RIGHT' : 'LEFT';
         }
       } else {
@@ -185,29 +215,34 @@ const PacBhaiGame: React.FC = () => {
     }
   };
 
-  // Game Loop Logic
   const update = useCallback((dt: number, tileSize: number) => {
     if (gameStateRef.current !== 'PLAYING') return;
 
     const pac = pacmanRef.current;
     
-    // 1. Pacman Movement Logic
-    const moveEntity = (entity: Entity) => {
+    // Update Particles
+    particlesRef.current.forEach(p => {
+        p.x += p.vx;
+        p.y += p.vy;
+        p.life -= 0.05;
+    });
+    particlesRef.current = particlesRef.current.filter(p => p.life > 0);
+
+    // 1. Movement Logic
+    const moveEntity = (entity: Entity, isPlayer: boolean = false) => {
       const x = entity.x;
       const y = entity.y;
       
       const col = Math.floor(x / tileSize);
       const row = Math.floor(y / tileSize);
       
-      // Center check
       const centerX = col * tileSize + tileSize / 2;
       const centerY = row * tileSize + tileSize / 2;
       const distToCenter = Math.sqrt(Math.pow(x - centerX, 2) + Math.pow(y - centerY, 2));
       
-      // Try to change direction if queued
+      // Try to change direction
       if (entity.nextDir !== 'NONE' && entity.nextDir !== entity.dir) {
-        if (distToCenter < 5) { // Close enough to center to turn
-          // Check if valid move
+        if (distToCenter < 5) { 
           let nextRow = row;
           let nextCol = col;
           if (entity.nextDir === 'UP') nextRow--;
@@ -215,68 +250,86 @@ const PacBhaiGame: React.FC = () => {
           if (entity.nextDir === 'LEFT') nextCol--;
           if (entity.nextDir === 'RIGHT') nextCol++;
 
-          if (mapRef.current[nextRow] && mapRef.current[nextRow][nextCol] !== TileType.WALL) {
+          const nextTile = mapRef.current[nextRow]?.[nextCol];
+          // Determine if passable
+          let passable = false;
+          if (nextTile !== TileType.WALL) {
+             if (nextTile === TileType.BREAKABLE_WALL) {
+                 // Only player can break, and only if threshold met
+                 if (isPlayer && samosasEatenRef.current >= WALL_BREAK_THRESHOLD) passable = true;
+                 else passable = false;
+             } else {
+                 passable = true;
+             }
+          }
+
+          if (passable) {
              entity.dir = entity.nextDir;
-             entity.x = centerX; // Snap to center
+             entity.x = centerX; 
              entity.y = centerY;
           }
         }
       }
 
-      // Move in current direction
-      let dx = 0; 
-      let dy = 0;
+      // Move
+      let dx = 0; let dy = 0;
       if (entity.dir === 'UP') dy = -1;
       else if (entity.dir === 'DOWN') dy = 1;
       else if (entity.dir === 'LEFT') dx = -1;
       else if (entity.dir === 'RIGHT') dx = 1;
 
-      // Wall Collision Lookahead
       const nextX = x + dx * entity.speed;
       const nextY = y + dy * entity.speed;
       
-      // Check wall collision
       const checkCol = Math.floor((nextX + (dx > 0 ? tileSize/2 : -tileSize/2)) / tileSize);
       const checkRow = Math.floor((nextY + (dy > 0 ? tileSize/2 : -tileSize/2)) / tileSize);
+      const checkTile = mapRef.current[checkRow]?.[checkCol];
 
-      if (mapRef.current[checkRow] && mapRef.current[checkRow][checkCol] !== TileType.WALL) {
+      let canMove = false;
+      if (checkTile !== TileType.WALL) {
+          if (checkTile === TileType.BREAKABLE_WALL) {
+             if (isPlayer && samosasEatenRef.current >= WALL_BREAK_THRESHOLD) canMove = true;
+             else canMove = false;
+          } else {
+             canMove = true;
+          }
+      }
+
+      if (canMove) {
         entity.x = nextX;
         entity.y = nextY;
       } else {
-        // Stop if hitting wall
         if (Math.abs(distToCenter) < 2) {
             entity.dir = 'NONE';
             entity.x = centerX;
             entity.y = centerY;
         } else {
-            // Move until center
              entity.x = nextX;
              entity.y = nextY;
         }
       }
 
-      // Screen wrapping (Tunnel)
       if (entity.x < -tileSize/2) entity.x = MAP_COLS * tileSize + tileSize/2;
       if (entity.x > MAP_COLS * tileSize + tileSize/2) entity.x = -tileSize/2;
     };
 
-    moveEntity(pac);
+    moveEntity(pac, true);
 
-    // Mouth Animation
     pac.mouthOpen += 0.1 * mouthOpenDirRef.current;
     if (pac.mouthOpen > 1) { pac.mouthOpen = 1; mouthOpenDirRef.current = -1; }
     if (pac.mouthOpen < 0) { pac.mouthOpen = 0; mouthOpenDirRef.current = 1; }
 
-    // 2. Eating Dots
+    // 2. Interaction (Eat, Break)
     const pCol = Math.floor(pac.x / tileSize);
     const pRow = Math.floor(pac.y / tileSize);
     
-    // Safety check for array bounds
     if (pRow >= 0 && pRow < MAP_ROWS && pCol >= 0 && pCol < MAP_COLS) {
         const tile = mapRef.current[pRow][pCol];
         if (tile === TileType.DOT) {
           mapRef.current[pRow][pCol] = TileType.EMPTY;
           pac.score += 10;
+          samosasEatenRef.current += 1;
+          setSamosasEaten(samosasEatenRef.current); // Update UI state
           setScore(pac.score);
           playSound('chomp');
         } else if (tile === TileType.POWER) {
@@ -285,15 +338,20 @@ const PacBhaiGame: React.FC = () => {
           pac.poweredUpTime = POWER_DURATION;
           setScore(pac.score);
           playSound('power');
-          // Scare Ghosts
           ghostsRef.current.forEach(g => {
              g.isScared = true;
              g.speed = GHOST_SCARED_SPEED;
           });
+        } else if (tile === TileType.BREAKABLE_WALL) {
+            // Because movement logic allowed us here, we assume we have the ability
+            mapRef.current[pRow][pCol] = TileType.EMPTY;
+            pac.score += 20;
+            setScore(pac.score);
+            playSound('break');
+            createParticles(pac.x, pac.y, COLORS.BREAKABLE_WALL);
         }
     }
 
-    // Power Up Decay
     if (pac.poweredUpTime > 0) {
         pac.poweredUpTime -= dt;
         if (pac.poweredUpTime <= 0) {
@@ -305,11 +363,9 @@ const PacBhaiGame: React.FC = () => {
         }
     }
 
-    // 3. Ghost AI & Movement
+    // 3. Ghost AI
     ghostsRef.current.forEach(ghost => {
-       if (ghost.isDead) {
-           // Return to center logic could go here, for now just respawn check or simple wander
-       }
+       if (ghost.isDead) return;
 
        const gCol = Math.floor(ghost.x / tileSize);
        const gRow = Math.floor(ghost.y / tileSize);
@@ -317,54 +373,45 @@ const PacBhaiGame: React.FC = () => {
        const centerY = gRow * tileSize + tileSize / 2;
        const distToCenter = Math.sqrt(Math.pow(ghost.x - centerX, 2) + Math.pow(ghost.y - centerY, 2));
 
-       // AI DECISION MAKING AT INTERSECTIONS
        if (distToCenter < 5) {
-           // Check available directions
            const options: Direction[] = [];
-           if (mapRef.current[gRow-1] && mapRef.current[gRow-1][gCol] !== TileType.WALL) options.push('UP');
-           if (mapRef.current[gRow+1] && mapRef.current[gRow+1][gCol] !== TileType.WALL) options.push('DOWN');
-           if (mapRef.current[gRow] && mapRef.current[gRow][gCol-1] !== TileType.WALL) options.push('LEFT');
-           if (mapRef.current[gRow] && mapRef.current[gRow][gCol+1] !== TileType.WALL) options.push('RIGHT');
+           const check = (r: number, c: number) => {
+               const t = mapRef.current[r]?.[c];
+               // Ghosts treat Breakable Wall as WALL
+               return t !== TileType.WALL && t !== TileType.BREAKABLE_WALL;
+           };
 
-           // Remove reverse direction unless dead end
+           if (check(gRow-1, gCol)) options.push('UP');
+           if (check(gRow+1, gCol)) options.push('DOWN');
+           if (check(gRow, gCol-1)) options.push('LEFT');
+           if (check(gRow, gCol+1)) options.push('RIGHT');
+
            const reverseDir = { UP: 'DOWN', DOWN: 'UP', LEFT: 'RIGHT', RIGHT: 'LEFT', NONE: 'NONE' }[ghost.dir];
            const validMoves = options.filter(d => d !== reverseDir);
            
            if (validMoves.length > 0) {
              if (ghost.isScared) {
-                // Frightened Mode: Move Randomly
                 ghost.nextDir = validMoves[Math.floor(Math.random() * validMoves.length)];
              } else {
-                // CHASE/AMBUSH AI
-                // 1. Determine Target Tile (tx, ty) based on Ghost Personality
                 let targetX = pCol;
                 let targetY = pRow;
 
-                if (ghost.id === 0) {
-                    // Blinky (Red): Direct Chase
-                    targetX = pCol;
-                    targetY = pRow;
-                } else if (ghost.id === 1) {
-                    // Pinky (Pink): Ambush (Target 4 tiles ahead of Pacman)
+                if (ghost.id === 0) { targetX = pCol; targetY = pRow; }
+                else if (ghost.id === 1) {
                     if (pac.dir === 'UP') targetY = pRow - 4;
                     else if (pac.dir === 'DOWN') targetY = pRow + 4;
                     else if (pac.dir === 'LEFT') targetX = pCol - 4;
                     else if (pac.dir === 'RIGHT') targetX = pCol + 4;
                 } else if (ghost.id === 2) {
-                    // Inky (Cyan): Unpredictable (Target random nearby tile)
-                    // We generate a random offset every time it reaches an intersection
-                    const offX = Math.floor(Math.random() * 5) - 2; // -2 to 2
+                    const offX = Math.floor(Math.random() * 5) - 2;
                     const offY = Math.floor(Math.random() * 5) - 2;
                     targetX = pCol + offX;
                     targetY = pRow + offY;
                 } else {
-                    // Clyde (Orange): Random / Pokey
-                    // Just picks a random valid move like before or targets self to wander
                     ghost.nextDir = validMoves[Math.floor(Math.random() * validMoves.length)];
                 }
 
                 if (ghost.id !== 3) {
-                    // 2. Select best direction to minimize distance to Target
                     let bestDir = validMoves[0];
                     let minDistance = Infinity;
 
@@ -375,8 +422,6 @@ const PacBhaiGame: React.FC = () => {
                         if (dir === 'DOWN') nextR++;
                         if (dir === 'LEFT') nextC--;
                         if (dir === 'RIGHT') nextC++;
-
-                        // Euclidean distance squared is enough for comparison
                         const distSq = Math.pow(nextC - targetX, 2) + Math.pow(nextR - targetY, 2);
                         if (distSq < minDistance) {
                             minDistance = distSq;
@@ -387,32 +432,27 @@ const PacBhaiGame: React.FC = () => {
                 }
              }
            } else if (options.length > 0) {
-             ghost.nextDir = options[0]; // Turn back if dead end
+             ghost.nextDir = options[0];
            }
        }
-       
        moveEntity(ghost);
 
-       // 4. Collision with Pacman
        const distToPac = Math.sqrt(Math.pow(ghost.x - pac.x, 2) + Math.pow(ghost.y - pac.y, 2));
        if (distToPac < tileSize * 0.8) {
            if (ghost.isScared) {
-               // Eat Ghost
                ghost.x = (MAP_COLS/2) * tileSize;
                ghost.y = (MAP_ROWS/2 - 2) * tileSize;
                ghost.isScared = false;
                ghost.speed = ghost.baseSpeed;
                pac.score += 200;
                setScore(pac.score);
-               playSound('power'); // reuse sound or add eatghost sound
+               playSound('power');
            } else {
-               // Pacman Dies
                handleDeath();
            }
        }
     });
 
-    // Check Win Condition
     let hasDots = false;
     for (let r=0; r<MAP_ROWS; r++) {
         for (let c=0; c<MAP_COLS; c++) {
@@ -422,9 +462,7 @@ const PacBhaiGame: React.FC = () => {
             }
         }
     }
-    if (!hasDots) {
-        handleWin();
-    }
+    if (!hasDots) handleWin();
 
   }, [playSound]);
 
@@ -433,13 +471,11 @@ const PacBhaiGame: React.FC = () => {
     if (pacmanRef.current.lives > 1) {
         pacmanRef.current.lives -= 1;
         setLives(pacmanRef.current.lives);
-        // Reset Positions
         const tileSize = (canvasRef.current?.width || 0) / MAP_COLS;
-        pacmanRef.current.x = 9 * tileSize + tileSize/2; // Approx start
+        pacmanRef.current.x = 9 * tileSize + tileSize/2;
         pacmanRef.current.y = 14 * tileSize + tileSize/2;
         pacmanRef.current.dir = 'NONE';
         pacmanRef.current.nextDir = 'NONE';
-        
         ghostsRef.current.forEach((g, i) => {
              g.x = (MAP_COLS/2 + (i%2==0?1:-1)) * tileSize;
              g.y = (MAP_ROWS/2 - 1) * tileSize;
@@ -472,6 +508,8 @@ const PacBhaiGame: React.FC = () => {
       pacmanRef.current.lives = 3;
       pacmanRef.current.score = 0;
       pacmanRef.current.mouthOpen = 0;
+      samosasEatenRef.current = 0;
+      setSamosasEaten(0);
       setScore(0);
       setLives(3);
       setCommentary('');
@@ -479,25 +517,18 @@ const PacBhaiGame: React.FC = () => {
       setUiState('PLAYING');
   };
 
-  // Render Loop
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // Resize handling
     const resizeCanvas = () => {
         const maxWidth = Math.min(window.innerWidth - 32, 600);
         const tileSize = Math.floor(maxWidth / MAP_COLS);
         canvas.width = tileSize * MAP_COLS;
         canvas.height = tileSize * MAP_ROWS;
-        
-        // Re-scale positions if resizing mid-game (simple reset is safer for now, but let's try to maintain relative)
-        // For MVP, we just init map if it's first load, else we rely on logic to keep x/y valid pixels
-        if (gameStateRef.current === 'START') {
-            initMap();
-        }
+        if (gameStateRef.current === 'START') initMap();
     };
     
     resizeCanvas();
@@ -508,10 +539,8 @@ const PacBhaiGame: React.FC = () => {
         lastTimeRef.current = time;
         const tileSize = canvas.width / MAP_COLS;
 
-        // Update Physics
         update(dt, tileSize);
 
-        // Draw
         ctx.fillStyle = COLORS.BG;
         ctx.fillRect(0, 0, canvas.width, canvas.height);
 
@@ -525,11 +554,20 @@ const PacBhaiGame: React.FC = () => {
                 if (tile === TileType.WALL) {
                     ctx.fillStyle = COLORS.WALL;
                     ctx.fillRect(x, y, tileSize, tileSize);
-                    // Inner brick detail
                     ctx.fillStyle = COLORS.WALL_INNER;
                     ctx.fillRect(x + 2, y + 2, tileSize - 4, tileSize - 4);
+                } else if (tile === TileType.BREAKABLE_WALL) {
+                    ctx.fillStyle = COLORS.BREAKABLE_WALL;
+                    ctx.fillRect(x, y, tileSize, tileSize);
+                    // Cracks pattern
+                    ctx.strokeStyle = COLORS.BREAKABLE_WALL_DETAIL;
+                    ctx.lineWidth = 2;
+                    ctx.beginPath();
+                    ctx.moveTo(x + 2, y + 2); ctx.lineTo(x + tileSize/2, y + tileSize/2);
+                    ctx.moveTo(x + tileSize - 2, y + 2); ctx.lineTo(x + tileSize/2, y + tileSize/2);
+                    ctx.moveTo(x + tileSize/2, y + tileSize - 2); ctx.lineTo(x + tileSize/2, y + tileSize/2);
+                    ctx.stroke();
                 } else if (tile === TileType.DOT) {
-                    // Samosa Shape (Triangle)
                     ctx.fillStyle = COLORS.DOT;
                     const cx = x + tileSize / 2;
                     const cy = y + tileSize / 2;
@@ -541,7 +579,6 @@ const PacBhaiGame: React.FC = () => {
                     ctx.closePath();
                     ctx.fill();
                 } else if (tile === TileType.POWER) {
-                    // Chai Cup Shape
                     ctx.fillStyle = COLORS.POWER;
                     const cx = x + tileSize / 2;
                     const cy = y + tileSize / 2 + 2;
@@ -551,100 +588,74 @@ const PacBhaiGame: React.FC = () => {
                     ctx.lineTo(cx + r, cy - r/2);
                     ctx.lineTo(cx - r, cy - r/2);
                     ctx.fill();
-                    // Handle
                     ctx.strokeStyle = COLORS.POWER;
                     ctx.lineWidth = 2;
                     ctx.beginPath();
                     ctx.arc(cx + r, cy - 2, 3, Math.PI/2, -Math.PI/2, true);
                     ctx.stroke();
-                    // Steam
-                    if (Math.floor(time / 200) % 2 === 0) {
-                        ctx.strokeStyle = '#fff';
-                        ctx.lineWidth = 1;
-                        ctx.beginPath();
-                        ctx.moveTo(cx - 2, cy - r);
-                        ctx.lineTo(cx - 2, cy - r - 5);
-                        ctx.moveTo(cx + 2, cy - r);
-                        ctx.lineTo(cx + 2, cy - r - 5);
-                        ctx.stroke();
-                    }
                 } else if (tile === TileType.GHOST_HOUSE) {
-                    // Slight pattern
                     ctx.fillStyle = '#292524';
                     ctx.fillRect(x, y, tileSize, tileSize);
                 }
             }
         }
 
-        // Draw Pacman (Pac-Bhai)
+        // Draw Particles
+        particlesRef.current.forEach(p => {
+            ctx.fillStyle = p.color;
+            ctx.globalAlpha = p.life;
+            ctx.fillRect(p.x, p.y, 4, 4);
+            ctx.globalAlpha = 1.0;
+        });
+
+        // Draw Pacman
         const p = pacmanRef.current;
         const px = p.x;
         const py = p.y;
         const pr = tileSize / 2 - 2;
-        
         ctx.fillStyle = COLORS.PACMAN;
         ctx.beginPath();
-        
-        // Calculate mouth angle
         let angle = 0;
         if (p.dir === 'RIGHT') angle = 0;
         if (p.dir === 'DOWN') angle = Math.PI / 2;
         if (p.dir === 'LEFT') angle = Math.PI;
         if (p.dir === 'UP') angle = -Math.PI / 2;
-        
         const mouthGap = p.mouthOpen * 0.2 * Math.PI;
-        
         ctx.arc(px, py, pr, angle + mouthGap, angle + 2 * Math.PI - mouthGap);
         ctx.lineTo(px, py);
         ctx.fill();
 
-        // Draw Mustache (The "Bhai" part)
         ctx.strokeStyle = '#000';
         ctx.lineWidth = 2;
         ctx.beginPath();
-        // Simple mustache curve based on direction
-        const mx = px + Math.cos(angle) * (pr * 0.5);
-        const my = py + Math.sin(angle) * (pr * 0.5);
-        // Adjust mustache relative to face center
-        // This is a bit static, but works for the visual
         ctx.moveTo(px - 4, py - 2);
         ctx.quadraticCurveTo(px, py - 6, px + 4, py - 2);
         ctx.stroke();
-
 
         // Draw Ghosts
         ghostsRef.current.forEach((g, idx) => {
              const gx = g.x;
              const gy = g.y;
              const gr = tileSize / 2 - 2;
-             
              ctx.fillStyle = g.isScared ? COLORS.GHOST_SCARED : g.color;
-             
-             // Ghost Body (Dome + Feet)
              ctx.beginPath();
              ctx.arc(gx, gy - 2, gr, Math.PI, 0);
              ctx.lineTo(gx + gr, gy + gr);
-             // Wavy feet
              for(let i=1; i<=3; i++) {
                  ctx.lineTo(gx + gr - (2*gr/3)*i, gy + gr - (i%2==0?2:0));
              }
              ctx.lineTo(gx - gr, gy + gr);
              ctx.fill();
-
-             // Turban (if not scared)
              if (!g.isScared) {
                  ctx.fillStyle = TURBAN_COLORS[idx % TURBAN_COLORS.length];
                  ctx.beginPath();
                  ctx.ellipse(gx, gy - gr + 2, gr, gr/2, 0, Math.PI, 0);
                  ctx.fill();
-                 // Jewel
                  ctx.fillStyle = '#fff';
                  ctx.beginPath();
                  ctx.arc(gx, gy - gr, 2, 0, Math.PI*2);
                  ctx.fill();
              }
-
-             // Eyes
              ctx.fillStyle = '#fff';
              const eyeOffX = 4;
              const eyeOffY = -2;
@@ -652,15 +663,12 @@ const PacBhaiGame: React.FC = () => {
              ctx.arc(gx - eyeOffX, gy + eyeOffY, 3, 0, Math.PI*2);
              ctx.arc(gx + eyeOffX, gy + eyeOffY, 3, 0, Math.PI*2);
              ctx.fill();
-             
              ctx.fillStyle = '#000';
-             // Pupils looking at Pacman
              const dx = p.x - gx;
              const dy = p.y - gy;
              const angleToPac = Math.atan2(dy, dx);
              const pupX = Math.cos(angleToPac) * 1.5;
              const pupY = Math.sin(angleToPac) * 1.5;
-
              ctx.beginPath();
              ctx.arc(gx - eyeOffX + pupX, gy + eyeOffY + pupY, 1.5, 0, Math.PI*2);
              ctx.arc(gx + eyeOffX + pupX, gy + eyeOffY + pupY, 1.5, 0, Math.PI*2);
@@ -677,31 +685,50 @@ const PacBhaiGame: React.FC = () => {
 
   return (
     <div className="flex flex-col items-center gap-4 w-full" ref={containerRef}>
-      {/* Score Board */}
-      <div className="flex w-full justify-between items-center bg-stone-800 p-4 rounded-xl border border-stone-700 shadow-xl max-w-[600px]">
-         <div className="flex flex-col">
-            <span className="text-xs text-stone-400 uppercase tracking-widest">Score</span>
-            <span className="text-2xl font-display text-orange-400">{score}</span>
-         </div>
-         <div className="flex flex-col items-center">
-            <span className="text-xs text-stone-400 uppercase tracking-widest">Lives</span>
-            <div className="flex gap-1">
-                {[...Array(lives)].map((_, i) => (
-                    <div key={i} className="w-4 h-4 bg-yellow-400 rounded-full" />
-                ))}
+      {/* Top Bar with Score and Hammer Progress */}
+      <div className="flex flex-col w-full max-w-[600px] gap-2">
+          <div className="flex w-full justify-between items-center bg-stone-800 p-4 rounded-xl border border-stone-700 shadow-xl">
+            <div className="flex flex-col">
+                <span className="text-xs text-stone-400 uppercase tracking-widest">Score</span>
+                <span className="text-2xl font-display text-orange-400">{score}</span>
             </div>
-         </div>
-         <div className="flex flex-col items-end">
-            <span className="text-xs text-stone-400 uppercase tracking-widest">High Score</span>
-            <span className="text-2xl font-display text-white">{highScore}</span>
-         </div>
+            <div className="flex flex-col items-center">
+                <span className="text-xs text-stone-400 uppercase tracking-widest">Lives</span>
+                <div className="flex gap-1">
+                    {[...Array(lives)].map((_, i) => (
+                        <div key={i} className="w-4 h-4 bg-yellow-400 rounded-full" />
+                    ))}
+                </div>
+            </div>
+            <div className="flex flex-col items-end">
+                <span className="text-xs text-stone-400 uppercase tracking-widest">High Score</span>
+                <span className="text-2xl font-display text-white">{highScore}</span>
+            </div>
+          </div>
+          
+          {/* Samosa / Wall Breaker Progress */}
+          <div className="bg-stone-800 p-2 rounded-lg border border-stone-700 flex items-center gap-3">
+              <div className={`p-1.5 rounded-md ${samosasEaten >= WALL_BREAK_THRESHOLD ? 'bg-orange-500 animate-pulse' : 'bg-stone-700'}`}>
+                  <Hammer size={16} className={samosasEaten >= WALL_BREAK_THRESHOLD ? 'text-white' : 'text-stone-500'} />
+              </div>
+              <div className="flex-1">
+                  <div className="flex justify-between text-[10px] uppercase text-stone-400 font-bold mb-1">
+                      <span>{samosasEaten >= WALL_BREAK_THRESHOLD ? "Wall Smash Active!" : "Unlock Wall Smash"}</span>
+                      <span>{Math.min(samosasEaten, WALL_BREAK_THRESHOLD)}/{WALL_BREAK_THRESHOLD}</span>
+                  </div>
+                  <div className="w-full h-2 bg-stone-900 rounded-full overflow-hidden">
+                      <div 
+                        className={`h-full transition-all duration-500 ${samosasEaten >= WALL_BREAK_THRESHOLD ? 'bg-gradient-to-r from-orange-500 to-yellow-400' : 'bg-stone-600'}`}
+                        style={{ width: `${Math.min((samosasEaten / WALL_BREAK_THRESHOLD) * 100, 100)}%` }}
+                      />
+                  </div>
+              </div>
+          </div>
       </div>
 
-      {/* Game Canvas Wrapper */}
       <div className="relative p-2 bg-orange-900 rounded-lg shadow-2xl border-4 border-orange-700">
          <canvas ref={canvasRef} className="rounded bg-black block" />
          
-         {/* Overlay Messages */}
          {uiState === 'START' && (
              <div className="absolute inset-0 flex items-center justify-center bg-black/60 backdrop-blur-[2px]">
                  <button 
@@ -729,7 +756,6 @@ const PacBhaiGame: React.FC = () => {
                  </h2>
                  <p className="text-stone-300 text-lg mb-6">Score: {score}</p>
                  
-                 {/* AI Commentary */}
                  <div className="bg-stone-800 p-4 rounded-lg border border-stone-600 mb-6 max-w-xs w-full min-h-[80px] flex items-center justify-center">
                     {loadingCommentary ? (
                         <RefreshCw className="animate-spin text-orange-500" />
@@ -749,9 +775,7 @@ const PacBhaiGame: React.FC = () => {
          )}
       </div>
 
-      {/* Controls Footer */}
       <div className="flex flex-col w-full max-w-[600px] mt-2 gap-4">
-         {/* Action Bar */}
          <div className="flex justify-between items-center w-full bg-stone-800 p-2 rounded-lg border border-stone-700">
             <div className="flex gap-4">
                 <button 
@@ -778,7 +802,6 @@ const PacBhaiGame: React.FC = () => {
             </button>
          </div>
 
-         {/* Mobile D-Pad */}
          <div className="flex md:hidden justify-center gap-2">
             <div className="flex flex-col items-center gap-1">
                  <button className="p-4 bg-stone-800 rounded-lg active:bg-orange-600 border border-stone-700 shadow-lg touch-manipulation" onPointerDown={() => handleManualControl('UP')}><ArrowUp size={28}/></button>
