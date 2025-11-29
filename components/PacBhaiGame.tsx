@@ -253,7 +253,8 @@ const PacBhaiGame: React.FC = () => {
           const nextTile = mapRef.current[nextRow]?.[nextCol];
           // Determine if passable
           let passable = false;
-          if (nextTile !== TileType.WALL) {
+          // CRITICAL FIX: explicit undefined check to prevent going off map
+          if (nextTile !== undefined && nextTile !== TileType.WALL) {
              if (nextTile === TileType.BREAKABLE_WALL) {
                  // Only player can break, and only if threshold met
                  if (isPlayer && samosasEatenRef.current >= WALL_BREAK_THRESHOLD) passable = true;
@@ -286,7 +287,8 @@ const PacBhaiGame: React.FC = () => {
       const checkTile = mapRef.current[checkRow]?.[checkCol];
 
       let canMove = false;
-      if (checkTile !== TileType.WALL) {
+      // CRITICAL FIX: Treat undefined (out of bounds) as WALL
+      if (checkTile !== undefined && checkTile !== TileType.WALL) {
           if (checkTile === TileType.BREAKABLE_WALL) {
              if (isPlayer && samosasEatenRef.current >= WALL_BREAK_THRESHOLD) canMove = true;
              else canMove = false;
@@ -309,6 +311,7 @@ const PacBhaiGame: React.FC = () => {
         }
       }
 
+      // Wrapping logic (Tunnel) - currently map has no tunnel, but this is safe with wall checks above
       if (entity.x < -tileSize/2) entity.x = MAP_COLS * tileSize + tileSize/2;
       if (entity.x > MAP_COLS * tileSize + tileSize/2) entity.x = -tileSize/2;
     };
@@ -377,8 +380,8 @@ const PacBhaiGame: React.FC = () => {
            const options: Direction[] = [];
            const check = (r: number, c: number) => {
                const t = mapRef.current[r]?.[c];
-               // Ghosts treat Breakable Wall as WALL
-               return t !== TileType.WALL && t !== TileType.BREAKABLE_WALL;
+               // CRITICAL FIX: Ghosts must check for undefined (out of bounds)
+               return t !== undefined && t !== TileType.WALL && t !== TileType.BREAKABLE_WALL;
            };
 
            if (check(gRow-1, gCol)) options.push('UP');
