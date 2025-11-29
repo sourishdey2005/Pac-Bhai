@@ -301,19 +301,37 @@ const PacBhaiGame: React.FC = () => {
         entity.x = nextX;
         entity.y = nextY;
       } else {
-        if (Math.abs(distToCenter) < 2) {
-            entity.dir = 'NONE';
+        // We hit a wall.
+        // If we are past the center of the current tile in the direction of movement, we must stop/snap.
+        // If we are approaching the center, we keep moving until we hit center.
+        
+        let isPastCenter = false;
+        if (entity.dir === 'RIGHT' && entity.x >= centerX) isPastCenter = true;
+        else if (entity.dir === 'LEFT' && entity.x <= centerX) isPastCenter = true;
+        else if (entity.dir === 'DOWN' && entity.y >= centerY) isPastCenter = true;
+        else if (entity.dir === 'UP' && entity.y <= centerY) isPastCenter = true;
+
+        if (isPastCenter) {
             entity.x = centerX;
             entity.y = centerY;
         } else {
-             entity.x = nextX;
-             entity.y = nextY;
+            // Approaching center, allow move but clamp to center to avoid overshooting
+            if (distToCenter < entity.speed) {
+                entity.x = centerX;
+                entity.y = centerY;
+            } else {
+                entity.x = nextX;
+                entity.y = nextY;
+            }
         }
       }
 
-      // Wrapping logic (Tunnel) - currently map has no tunnel, but this is safe with wall checks above
-      if (entity.x < -tileSize/2) entity.x = MAP_COLS * tileSize + tileSize/2;
-      if (entity.x > MAP_COLS * tileSize + tileSize/2) entity.x = -tileSize/2;
+      // Hard Boundary Clamp (Just in case logic fails or map has holes)
+      // This prevents absolutely leaving the screen area
+      if (entity.x < 0) entity.x = 0;
+      if (entity.x > MAP_COLS * tileSize) entity.x = MAP_COLS * tileSize;
+      if (entity.y < 0) entity.y = 0;
+      if (entity.y > MAP_ROWS * tileSize) entity.y = MAP_ROWS * tileSize;
     };
 
     moveEntity(pac, true);
